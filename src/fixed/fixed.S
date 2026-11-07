@@ -52,13 +52,12 @@ q_mul_asm:
     li t0, 0
     li t1, 0
     li t3, 0
-.Lmul_loop:
     beqz a1, .Lmul_signed
+.Lmul_loop:
     andi t4, a1, 1
     beqz t4, .Lmul_shift
-    add t4, t0, t2
-    sltu t5, t4, t0
-    mv t0, t4
+    add t0, t0, t2
+    sltu t5, t0, t2
     add t1, t1, t3
     add t1, t1, t5
 .Lmul_shift:
@@ -67,7 +66,7 @@ q_mul_asm:
     or t3, t3, t4
     slli t2, t2, 1
     srli a1, a1, 1
-    j .Lmul_loop
+    bnez a1, .Lmul_loop
 .Lmul_signed:
     beqz t6, .Lmul_round
     # Two's-complement the full 64-bit product.
@@ -76,13 +75,12 @@ q_mul_asm:
     not t1, t1
     add t1, t1, t4
 .Lmul_round:
-    # Add half a Q11.20 unit, then take bits 20 through 51.
-    lui t2, 0x80
-    add t2, t0, t2
-    sltu t4, t2, t0
-    add t1, t1, t4
-    srli t2, t2, 20
+    # Rounding adds bit 19 to bits 20 through 51 modulo 2^32.
+    srli t2, t0, 20
     slli t1, t1, 12
-    or a0, t2, t1
+    or t2, t2, t1
+    srli t0, t0, 19
+    andi t0, t0, 1
+    add a0, t2, t0
     ret
     .size q_mul_asm, .-q_mul_asm

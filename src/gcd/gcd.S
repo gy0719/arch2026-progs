@@ -26,17 +26,22 @@ gcd_u32_asm:
 .Lb_odd:
     andi t1, a1, 1
     bnez t1, .Lcompare
+.Lshift_b:
     srli a1, a1, 1
-    j .Lb_odd
-# Subtract the smaller odd operand from the larger one.
+    andi t1, a1, 1
+    beqz t1, .Lshift_b
+# The nonzero difference of two odd operands is always even.
 .Lcompare:
-    bleu a0, a1, .Lsubtract
-    mv t1, a0
+    bltu a1, a0, .Lswap
+    sub a1, a1, a0
+    bnez a1, .Lshift_b
+    j .Ldone
+.Lswap:
+    sub t1, a0, a1
     mv a0, a1
     mv a1, t1
-.Lsubtract:
-    sub a1, a1, a0
-    bnez a1, .Lb_odd
+    j .Lshift_b
+.Ldone:
     sll a0, a0, t0
 .Lret:
     ret

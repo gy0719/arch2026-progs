@@ -6,6 +6,7 @@ uint32_t gcd_u32(uint32_t a, uint32_t b)
         return b;
     if (!b)
         return a;
+    /* Save the common power of two before making both operands odd. */
     unsigned shift = 0;
     while (((a | b) & 1u) == 0) {
         a >>= 1;
@@ -14,15 +15,21 @@ uint32_t gcd_u32(uint32_t a, uint32_t b)
     }
     while ((a & 1u) == 0)
         a >>= 1;
-    do {
-        while ((b & 1u) == 0)
-            b >>= 1;
+    while ((b & 1u) == 0)
+        b >>= 1;
+    for (;;) {
         if (a > b) {
             uint32_t t = a;
             a = b;
             b = t;
         }
         b -= a;
-    } while (b);
+        if (!b)
+            break;
+        /* The nonzero difference of two odd numbers is even. */
+        do {
+            b >>= 1;
+        } while ((b & 1u) == 0);
+    }
     return a << shift;
 }

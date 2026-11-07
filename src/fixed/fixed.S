@@ -6,14 +6,13 @@
     .align 2
 op1_asm:
     li t0, 0
-.Ladd_loop:
     beqz a1, .Ladd_done
+.Ladd_loop:
     and t1, a0, a1
-    slli t1, t1, 1
     xor a0, a0, a1
-    mv a1, t1
+    slli a1, t1, 1
     addi t0, t0, 1
-    j .Ladd_loop
+    bnez a1, .Ladd_loop
 .Ladd_done:
     sw t0, 0(a2)
     ret

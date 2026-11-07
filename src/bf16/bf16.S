@@ -152,17 +152,52 @@ bf16_sqrt_asm:
     addi t1, t1, 1
     slli t1, t1, 7
     addi t1, t1, -1
-    li t2, 0
-    li t3, 0x4000
-.Lsqrt_loop:
+    # Every normal input has x >= 128^2, so the first step succeeds.
+    li t2, 0x4000
+    sub t1, t1, t2
+    li t3, 0x1000
+    # The first remaining weight is 4096; later weights fit immediates.
     add t4, t2, t3
     srli t2, t2, 1
-    bltu t1, t4, .Lsqrt_skip
+    bltu t1, t4, 1f
     sub t1, t1, t4
     add t2, t2, t3
-.Lsqrt_skip:
-    srli t3, t3, 2
-    bnez t3, .Lsqrt_loop
+1:
+    addi t4, t2, 1024
+    srli t2, t2, 1
+    bltu t1, t4, 1f
+    sub t1, t1, t4
+    addi t2, t2, 1024
+1:
+    addi t4, t2, 256
+    srli t2, t2, 1
+    bltu t1, t4, 1f
+    sub t1, t1, t4
+    addi t2, t2, 256
+1:
+    addi t4, t2, 64
+    srli t2, t2, 1
+    bltu t1, t4, 1f
+    sub t1, t1, t4
+    addi t2, t2, 64
+1:
+    addi t4, t2, 16
+    srli t2, t2, 1
+    bltu t1, t4, 1f
+    sub t1, t1, t4
+    addi t2, t2, 16
+1:
+    addi t4, t2, 4
+    srli t2, t2, 1
+    bltu t1, t4, 1f
+    sub t1, t1, t4
+    addi t2, t2, 4
+1:
+    addi t4, t2, 1
+    srli t2, t2, 1
+    bltu t1, t4, 1f
+    addi t2, t2, 1
+1:
     addi t0, t0, 127
     srli t0, t0, 1
     slli t0, t0, 7

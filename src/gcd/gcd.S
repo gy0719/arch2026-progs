@@ -1,5 +1,5 @@
-# Binary GCD leaf function: a0/a1 hold operands, t0 the common shift,
-# and t1 is a temporary. All registers used are caller-saved.
+# Leaf function: a0/a1 are the operands, t0 holds the common power of two.
+# All temporaries are caller-saved; no stack or memory access is needed.
     .text
     .globl gcd_u32_asm
     .type gcd_u32_asm, @function
@@ -8,7 +8,6 @@ gcd_u32_asm:
     beqz a0, .Lret_b
     beqz a1, .Lret
     li t0, 0
-# Remove the common power of two and restore it at the end.
 .Lcommon:
     or t1, a0, a1
     andi t1, t1, 1
@@ -17,12 +16,30 @@ gcd_u32_asm:
     srli a1, a1, 1
     addi t0, t0, 1
     j .Lcommon
-# Remove remaining factors of two from each nonzero operand.
+# Strip trailing zeroes from a in chunks. The zero input was handled above,
+# so after these tests a single final shift is sufficient.
 .La_odd:
     andi t1, a0, 1
     bnez t1, .Lb_odd
+    slli t1, a0, 16
+    bnez t1, .La_8
+    srli a0, a0, 16
+.La_8:
+    andi t1, a0, 255
+    bnez t1, .La_4
+    srli a0, a0, 8
+.La_4:
+    andi t1, a0, 15
+    bnez t1, .La_2
+    srli a0, a0, 4
+.La_2:
+    andi t1, a0, 3
+    bnez t1, .La_1
+    srli a0, a0, 2
+.La_1:
+    andi t1, a0, 1
+    bnez t1, .Lb_odd
     srli a0, a0, 1
-    j .La_odd
 .Lb_odd:
     andi t1, a1, 1
     bnez t1, .Lcompare
@@ -30,7 +47,7 @@ gcd_u32_asm:
     srli a1, a1, 1
     andi t1, a1, 1
     beqz t1, .Lshift_b
-# The nonzero difference of two odd operands is always even.
+# Both operands are odd. Their nonzero difference is necessarily even.
 .Lcompare:
     bltu a1, a0, .Lswap
     sub a1, a1, a0

@@ -2,11 +2,12 @@
 
 #include <limits.h>
 
+#include "rubik_c_pdb.h"
 #include "rubik_tables.h"
 
 /* Ported from gy0719/minirubik my_solver.c (da6a286ace69).
- * IDA* searches the target, using only 7! and 3^6 abstractions (37,499
- * table bytes). No full-state table, heap, runtime setup, or recursion.
+ * IDA* searches the target using permutation, orientation, and four-corner
+ * abstractions. No full-state table, heap, runtime setup, or recursion.
  * An abstract distance is a lower bound on the concrete distance; their
  * maximum remains admissible. Increasing the bound to the smallest exceeded
  * f therefore finds a shortest HTM solution. Consecutive moves on the same
@@ -29,6 +30,7 @@ typedef struct {
 /* Search coordinates: p < PERMUTATIONS and o < ORIENTATIONS. */
 typedef struct {
     uint16_t p, o;
+    uint32_t pattern;
 } ranked_state_t;
 
 /* Pointer views avoid variable large-stride multiplication on RV32I. */
@@ -123,11 +125,22 @@ static int valid(const state_t *state)
 static ranked_state_t rank_coordinates(const state_t *state)
 {
     ranked_state_t coordinates = {rank_permutation(state->p),
-                                  rank_orientation(state->o)};
+                                  rank_orientation(state->o), 0};
+    uint32_t orientation = 0;
+    for (uint8_t cubie = 0; cubie < 4; ++cubie) {
+        for (uint8_t position = 0; position < CUBIES; ++position) {
+            if (state->p[position] == cubie) {
+                orientation = orientation * 3U + state->o[position];
+                break;
+            }
+        }
+    }
+    coordinates.pattern =
+        ((uint32_t) pdb_perm_map[coordinates.p] << 7) | orientation;
     return coordinates;
 }
 /* Even indices use the low nibble; odd indices use the high nibble. */
-static uint8_t packed_get(const uint8_t *table, uint16_t index)
+static uint8_t packed_get(const uint8_t *table, uint32_t index)
 {
     unsigned shift = (index & 1U) << 2;
     return (uint8_t) ((table[index >> 1] >> shift) & 0xFU);
@@ -141,22 +154,26 @@ static uint8_t heuristic(ranked_state_t state)
 {
     uint8_t p = packed_get(hp_packed, state.p);
     uint8_t o = packed_get(ho_packed, state.o);
-    /* Both abstractions charge for the same moves: use max, never sum. */
-    return p > o ? p : o;
+    uint32_t index = (state.pattern >> 7) * 81U + (state.pattern & 127U);
+    uint8_t pattern = packed_get(pdb_distances, index);
+    /* The abstractions charge for the same moves: use max, never sum. */
+    uint8_t best = p > o ? p : o;
+    return best > pattern ? best : pattern;
 }
 
-/* Eight 32-bit fields per suspended node, independent of pointer width.
+/* Ten 32-bit fields per suspended node, independent of pointer width.
  * Coordinates and cursors stay in locals while a node is active. Only an
  * expanded child suspends its parent; cutoff/goal leaves need no frame writes.
  */
 typedef struct {
     uint32_t p, o;
     uint32_t quarter_p, quarter_o;
+    uint32_t pattern, quarter_pattern;
     uint32_t face, turn;
     uint32_t previous, minimum;
 } search_frame_t;
 
-_Static_assert(sizeof(search_frame_t) == 32, "search frame must be 32 bytes");
+_Static_assert(sizeof(search_frame_t) == 40, "search frame must be 40 bytes");
 
 /* Return FOUND, or the minimum f that exceeded the current bound.
  * One loop generates children, enters expanded nodes and restores parents.
@@ -174,6 +191,7 @@ static int search(ranked_state_t state, int bound, solution_t *solution)
     }
     uint32_t depth = 0, p = state.p, o = state.o;
     uint32_t quarter_p = p, quarter_o = o;
+    uint32_t pattern = state.pattern, quarter_pattern = pattern;
     uint32_t face = 0, turn = 0, previous = NONE, minimum = INT_MAX;
     const uint16_t *perm_row = NULL, *ori_row = NULL;
 
@@ -191,6 +209,8 @@ static int search(ranked_state_t state, int bound, solution_t *solution)
             o = parent->o;
             quarter_p = parent->quarter_p;
             quarter_o = parent->quarter_o;
+            pattern = parent->pattern;
+            quarter_pattern = parent->quarter_pattern;
             face = parent->face;
             turn = parent->turn;
             previous = parent->previous;
@@ -217,13 +237,20 @@ static int search(ranked_state_t state, int bound, solution_t *solution)
 
             quarter_p = p;
             quarter_o = o;
+            quarter_pattern = pattern;
         }
         quarter_p = perm_row[quarter_p];
         quarter_o = ori_row[quarter_o];
+        uint32_t entry =
+            pdb_moves[face * PDB_POSITIONS + (quarter_pattern >> 7)];
+        quarter_pattern =
+            (entry & 0x1ffffU) |
+            pdb_orientation[(entry >> 17) + (quarter_pattern & 127U)];
 
         solution->moves[depth] = (uint8_t) ((face << 1) + face + turn);
         ++turn;
-        ranked_state_t next = {(uint16_t) quarter_p, (uint16_t) quarter_o};
+        ranked_state_t next = {(uint16_t) quarter_p, (uint16_t) quarter_o,
+                               quarter_pattern};
         f = (int) (depth + 1U) + heuristic(next);
         if (f > bound) {
             if ((uint32_t) f < minimum)
@@ -242,6 +269,8 @@ static int search(ranked_state_t state, int bound, solution_t *solution)
         parent->o = o;
         parent->quarter_p = quarter_p;
         parent->quarter_o = quarter_o;
+        parent->pattern = pattern;
+        parent->quarter_pattern = quarter_pattern;
         parent->face = face;
         parent->turn = turn;
         parent->previous = previous;
@@ -250,6 +279,7 @@ static int search(ranked_state_t state, int bound, solution_t *solution)
         ++depth;
         p = quarter_p;
         o = quarter_o;
+        pattern = quarter_pattern;
         previous = face;
         face = 0;
         turn = 0;

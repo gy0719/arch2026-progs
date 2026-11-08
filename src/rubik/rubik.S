@@ -310,7 +310,8 @@ rubik_asm_rank_orientation:
 # Private core convention (only the public wrapper obeys the external ABI):
 # a4/a5 root ranks, a6 solve return PC, t6 search/replay return PC.
 # heuristic uses a3 for its return PC and preserves a4..a6/t6/s registers.
-# search keeps the active node in s0..s11, table bases in a2/a3/t3/t4,
+# search keeps the active node in s0..s11, row-pair base in a2,
+# heuristic bases in t3/t4,
 # a1 = 11, ra = 3, t5 = suspended-frame cursor, a7 = path cursor.
 # All helpers keep sp unchanged. The inner loop makes no function calls.
 
@@ -382,22 +383,15 @@ rubik_asm_quarter_transition:
     ret
 .size rubik_asm_quarter_transition, . - rubik_asm_quarter_transition
 
-/* Inline row selection at both search sites. The fixed face-major layout
- * stays unchanged; a2/a3 contain the cached permutation/orientation bases.
- * Macro expansion adds no calls, stack traffic, or new lookup tables.
+/* A face indexes one aligned pair of precomputed transition row pointers.
+ * a2 holds the pair table's base; t1 is scratch. The saved frame still holds
+ * face numbers 0..2, so restoring a parent selects exactly the same rows.
  */
 .macro search_transition_rows
-    mv      s10, a2
-    mv      s11, a3
-    beqz    s5, .Lsearch_rows_done\@
-    li      t1, 10080
-    add     s10, s10, t1
-    addi    s11, s11, 1458
-    li      t2, 1
-    beq     s5, t2, .Lsearch_rows_done\@
-    add     s10, s10, t1
-    addi    s11, s11, 1458
-.Lsearch_rows_done\@:
+    slli    t1, s5, 3
+    add     t1, a2, t1
+    lw      s10, 0(t1)
+    lw      s11, 4(t1)
 .endm
 
 /* a0 = root p, a1 = root o, a2 = bound.
@@ -406,7 +400,7 @@ rubik_asm_quarter_transition:
  *   s0 depth; s1 p; s2 o; s3 quarter_p; s4 quarter_o;
  *   s5 face; s6 turn; s7 previous; s8 minimum; s9 bound;
  *   s10 permutation row; s11 orientation row; t3 hp base; t4 ho base.
- *   a2 permutation table base; a3 orientation table base.
+ *   a2 transition row-pair table base.
  *   t5 points to the current depth's frame slot, updated only on push/pop.
  *   a7 points to the current depth's solution_path byte.
  *   ra is the constant 3; the inner search loop makes no calls.
@@ -426,8 +420,7 @@ rubik_asm_search:
     /* Cache packed table bases once per expanded rubik_asm_search root. */
     la      t3, rubik_asm_hp_packed
     la      t4, rubik_asm_ho_packed
-    la      a2, rubik_asm_perm_move_table
-    la      a3, rubik_asm_ori_move_table
+    la      a2, .Lrubik_transition_rows
     addi    t5, sp, 0
     addi    a7, sp, 384
     li      ra, 3
@@ -493,12 +486,6 @@ rubik_asm_search:
     slli    t0, s4, 1
     add     t0, s11, t0
     lhu     s4, 0(t0)
-    slli    t0, s5, 1
-    add     t0, t0, s5
-    add     t0, t0, s6
-    sb      t0, 0(a7)
-    addi    s6, s6, 1
-
     /* Inline the child heuristic; cold root/solve calls keep the helper.
      * Preserve its nibble convention and max comparison exactly.
      */
@@ -523,6 +510,12 @@ rubik_asm_search:
     addi    t0, s0, 1
     add     a0, t0, a0
     bltu    s9, a0, .Lsearch_cutoff
+    /* Only a child within the bound can extend the solution path. */
+    slli    t1, s5, 1
+    add     t1, t1, s5
+    add     t1, t1, s6
+    sb      t1, 0(a7)
+    addi    s6, s6, 1
     or      t1, s3, s4
     beqz    t1, .Lsearch_child_goal
     beq     t0, a1, .Lsearch_loop
@@ -551,6 +544,7 @@ rubik_asm_search:
     j       .Lsearch_loop
 
 .Lsearch_cutoff:
+    addi    s6, s6, 1
     bgeu    a0, s8, .Lsearch_loop
     mv      s8, a0
     j       .Lsearch_loop
@@ -674,3 +668,10 @@ rubik_asm_replay_solution:
     .section .rodata,"a",@progbits
 .Lrubik_move_names:
     .asciz "R", "", "R2", "R'", "B", "", "B2", "B'", "D", "", "D2", "D'"
+
+    /* Three face-major row pairs. Strides are in bytes, not halfwords. */
+    .balign 4
+.Lrubik_transition_rows:
+    .word rubik_asm_perm_move_table, rubik_asm_ori_move_table
+    .word rubik_asm_perm_move_table + 10080, rubik_asm_ori_move_table + 1458
+    .word rubik_asm_perm_move_table + 20160, rubik_asm_ori_move_table + 2916

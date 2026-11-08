@@ -3,12 +3,12 @@
 # No C calls, heap, writable globals, recursive calls, or environment access.
 #
 # The 496-byte frame remains 16-byte aligned throughout all private helpers:
-#   0..383    twelve 32-byte search slots, four words used per node
+#   0..383    twelve 32-byte search slots, five words used per node
 #   384..395  solution path (at most eleven moves)
 #   396       solution length
 #   400/404   original permutation/orientation ranks for replay
 #   408/412   output pointer/capacity
-#   416       original input pointer
+#   416/420   original input pointer / root subset coordinate
 #   432..479  saved s0..s11; 480 saved ra; other bytes are padding
 # Validation uses a0..a2 and t0..t6 before allocating the frame. Helpers use
 # a/t registers and s0..s11 under the private convention described below;
@@ -83,7 +83,36 @@ rubik_solve_asm:
     addi    a0, a0, 7
     jal     ra, rubik_asm_rank_orientation
     sw      a0, 404(sp)
-    mv      a1, a0
+    # Form the selected cubies' abstract coordinates once per call.
+    lw      t0, 400(sp)
+    slli    t0, t0, 1
+    la      t1, rubik_pdb_perm_map
+    add     t0, t0, t1
+    lhu     t0, 0(t0)
+    slli    t0, t0, 7
+    lw      t1, 416(sp)
+    li      a0, 0
+    li      a1, 49
+.Lpdb_root_find:
+    li      t3, 0
+.Lpdb_root_scan:
+    add     t4, t1, t3
+    lbu     t5, 0(t4)
+    beq     t5, a1, .Lpdb_root_digit
+    addi    t3, t3, 1
+    j       .Lpdb_root_scan
+.Lpdb_root_digit:
+    lbu     t5, 7(t4)
+    addi    t5, t5, -49
+    slli    t4, a0, 1
+    add     a0, a0, t4
+    add     a0, a0, t5
+    addi    a1, a1, 1
+    li      t3, 53
+    bltu    a1, t3, .Lpdb_root_find
+    or      a4, t0, a0
+    sw      a4, 420(sp)
+    lw      a1, 404(sp)
     lw      a0, 400(sp)
     jal     ra, rubik_asm_solve
     beqz    a0, .Lrubik_internal_failure
@@ -308,28 +337,58 @@ rubik_asm_rank_orientation:
 
 
 # Private core convention (only the public wrapper obeys the external ABI):
-# a4/a5 root ranks, a6 solve return PC, t6 search/replay return PC.
-# heuristic preserves a4..a6/t6/s registers.
-# search keeps the active node in s0..s11, row-pair base in a2,
-# heuristic bases in t3/t4,
-# a1 = 11, ra = 3, t5 = suspended-frame cursor, a7 = path cursor.
+# a4/a5 current/quarter subset coordinates, a6 solve return PC,
+# t6 search/replay return PC. Heuristic preserves a4..a6/t6/s registers.
+# Search keeps the active node in s0..s11, row-triple base in a2,
+# subset transition row in a3, and hp/ho table bases in t3/t4.
+# a1 = packed subset table base, ra = 3, t5 = frame cursor, a7 = path cursor.
 # All helpers keep sp unchanged. The inner loop makes no function calls.
 
-/* a0 = p, a1 = o; return max(hp[p], ho[o]) in a0. Clobbers t0/t2.
- * One byte per distance removes nibble extraction on both lookup paths.
+/* a0 = subset coordinate; return its packed distance in a0.
+ * The abstract distances are a lower bound on real moves. Clobbers t0..t2.
+ */
+.type rubik_asm_pdb_heuristic, @function
+rubik_asm_pdb_heuristic:
+    srli    t0, a0, 7
+    slli    t1, t0, 6
+    slli    t2, t0, 4
+    add     t1, t1, t2
+    add     t1, t1, t0
+    andi    t0, a0, 127
+    add     t1, t1, t0
+    andi    t2, t1, 1
+    slli    t2, t2, 2
+    srli    t1, t1, 1
+    la      t0, rubik_pdb_distances
+    add     t0, t0, t1
+    lbu     t0, 0(t0)
+    srl     a0, t0, t2
+    andi    a0, a0, 15
+    ret
+.size rubik_asm_pdb_heuristic, . - rubik_asm_pdb_heuristic
+
+/* a0 = p, a1 = o, a4 = subset; return max(hp, ho, subset) in a0.
+ * Clobbers a0, a2, a3, ra and t0..t2; preserves the private caller's a4..a6.
  */
 .type rubik_asm_heuristic, @function
 rubik_asm_heuristic:
+    mv      a3, ra
     la      t0, rubik_asm_hp_bytes
     add     t0, t0, a0
     lbu     t2, 0(t0)
     la      t0, rubik_asm_ho_bytes
     add     t0, t0, a1
     lbu     a0, 0(t0)
-    bgeu    a0, t2, .Lheuristic_return
+    bgeu    a0, t2, .Lheuristic_base_max
     mv      a0, t2
+.Lheuristic_base_max:
+    mv      a2, a0
+    mv      a0, a4
+    jal     ra, rubik_asm_pdb_heuristic
+    bgeu    a0, a2, .Lheuristic_return
+    mv      a0, a2
 .Lheuristic_return:
-    ret
+    jalr    zero, 0(a3)
 .size rubik_asm_heuristic, . - rubik_asm_heuristic
 
 /* a0 = face (R=0, B=1, D=2); return a0/a1 = p/o row pointers.
@@ -367,15 +426,16 @@ rubik_asm_quarter_transition:
     ret
 .size rubik_asm_quarter_transition, . - rubik_asm_quarter_transition
 
-/* A face indexes one aligned pair of precomputed transition row pointers.
- * a2 holds the pair table's base; t1 is scratch. The saved frame still holds
+/* A face indexes an aligned group of three transition row pointers.
+ * a2 holds the group table's base; t1 is scratch. The saved frame still holds
  * face numbers 0..2, so restoring a parent selects exactly the same rows.
  */
 .macro search_transition_rows
-    slli    t1, s5, 3
+    slli    t1, s5, 4
     add     t1, a2, t1
     lw      s10, 0(t1)
     lw      s11, 4(t1)
+    lw      a3, 8(t1)
 .endm
 
 /* a0 = root p, a1 = root o, a2 = bound.
@@ -384,11 +444,12 @@ rubik_asm_quarter_transition:
  *   s0 depth; s1 p; s2 o; s3 quarter_p; s4 quarter_o;
  *   s5 face; s6 turn; s7 previous; s8 iteration minimum; s9 bound;
  *   s10 permutation row; s11 orientation row; t3 hp base; t4 ho base.
- *   a2 transition row-pair table base.
+ *   a2 row-group base; a3 subset transition row.
+ *   a4 node subset coordinate; a5 current quarter-turn subset coordinate.
  *   t5 points to the current depth's frame slot, updated only on push/pop.
  *   a7 points to the current depth's solution_path byte.
  *   ra is the constant 3; the inner search loop makes no calls.
- *   a1 is the constant maximum depth 11.
+ *   a1 is the packed subset-distance table base.
  */
 .type rubik_asm_search, @function
 rubik_asm_search:
@@ -408,7 +469,7 @@ rubik_asm_search:
     addi    t5, sp, 0
     addi    a7, sp, 384
     li      ra, 3
-    li      a1, 11
+    la      a1, rubik_pdb_distances
 
     li      s0, 0
     mv      s3, s1
@@ -435,6 +496,7 @@ rubik_asm_search:
     /* The child's root coordinates are the parent's saved quarter turn. */
     mv      s3, s1
     mv      s4, s2
+    mv      a5, a4
     /* The child's previous face is the parent's current face. */
     mv      s5, s7
     /* The minimum cutoff belongs to the whole iteration, not one node. */
@@ -443,6 +505,7 @@ rubik_asm_search:
     addi    a7, a7, -1
     lw      s1, 0(t5)
     lw      s2, 4(t5)
+    lw      a4, 8(t5)
     lw      s7, 24(t5)
     search_transition_rows
     j       .Lsearch_generate
@@ -455,6 +518,7 @@ rubik_asm_search:
     addi    a7, a7, -1
     lw      s1, 0(t5)
     lw      s2, 4(t5)
+    lw      a4, 8(t5)
     lw      s7, 24(t5)
     j       .Lsearch_advance_face
 
@@ -468,6 +532,7 @@ rubik_asm_search:
     search_transition_rows
     mv      s3, s1
     mv      s4, s2
+    mv      a5, a4
 
 .Lsearch_generate:
     /* Reuse the preceding quarter turn for half/inverse children. */
@@ -477,13 +542,46 @@ rubik_asm_search:
     slli    t0, s4, 1
     add     t0, s11, t0
     lhu     s4, 0(t0)
+    # The low 17 bits encode the next position rank shifted left by seven;
+    # the upper bits select a precomputed orientation-delta row.
+    srli    t0, a5, 7
+    slli    t0, t0, 2
+    add     t0, a3, t0
+    lw      t1, 0(t0)
+    srli    t0, t1, 17
+    andi    t2, a5, 127
+    add     t0, t0, t2
+    la      t2, rubik_pdb_orientation
+    add     t0, t0, t2
+    lbu     t0, 0(t0)
+    slli    t1, t1, 15
+    srli    t1, t1, 15
+    or      a5, t1, t0
     /* Inline the same byte-table max used by the cold root helper. */
     add     t0, t3, s3
     lbu     t2, 0(t0)
     add     t0, t4, s4
     lbu     a0, 0(t0)
-    bgeu    a0, t2, .Lsearch_child_heuristic_done
+    bgeu    a0, t2, .Lsearch_base_heuristic_done
     mv      a0, t2
+.Lsearch_base_heuristic_done:
+    # max(hp, ho, subset distance): all three cost the same move.
+    srli    t0, a5, 7
+    slli    t1, t0, 6
+    slli    t2, t0, 4
+    add     t1, t1, t2
+    add     t1, t1, t0
+    andi    t0, a5, 127
+    add     t1, t1, t0
+    andi    t2, t1, 1
+    slli    t2, t2, 2
+    srli    t1, t1, 1
+    add     t0, a1, t1
+    lbu     t0, 0(t0)
+    srl     t0, t0, t2
+    andi    t0, t0, 15
+    bgeu    a0, t0, .Lsearch_child_heuristic_done
+    mv      a0, t0
 .Lsearch_child_heuristic_done:
     /* Keep child depth in t0; a0 holds f until cutoff handling finishes. */
     addi    t0, s0, 1
@@ -497,14 +595,16 @@ rubik_asm_search:
     addi    s6, s6, 1
     or      t1, s3, s4
     beqz    t1, .Lsearch_child_goal
-    beq     t0, a1, .Lsearch_loop
+    sltiu   t1, t0, 11
+    beqz    t1, .Lsearch_loop
 
     /* Only an expanded child suspends its parent. Frame layout:
-     * +0 p, +4 o, +8/+12/+16 unused,
+     * +0 p, +4 o, +8 subset coordinate, +12/+16 unused,
      * +20 turn, +24 previous, +28 unused; stride = 32 bytes.
      */
     sw      s1, 0(t5)
     sw      s2, 4(t5)
+    sw      a4, 8(t5)
     sw      s6, 20(t5)
     sw      s7, 24(t5)
     addi    t5, t5, 32
@@ -512,6 +612,7 @@ rubik_asm_search:
     addi    a7, a7, 1
     mv      s1, s3
     mv      s2, s4
+    mv      a4, a5
     mv      s7, s5
     li      s5, 0
     li      s6, 0
@@ -544,9 +645,8 @@ rubik_asm_search:
  */
 .type rubik_asm_solve, @function
 rubik_asm_solve:
-    mv      a4, a0
-    mv      a5, a1
     mv      a6, ra
+    lw      a4, 420(sp)
     addi    t0, sp, 396
     sw      zero, 0(t0)
     addi    t0, sp, 384
@@ -558,8 +658,9 @@ rubik_asm_solve:
 .Lsolve_iteration:
     li      t0, 11
     bltu    t0, s9, .Lsolve_failed
-    mv      a0, a4
-    mv      a1, a5
+    lw      a0, 400(sp)
+    lw      a1, 404(sp)
+    lw      a4, 420(sp)
     mv      a2, s9
     jal     ra, rubik_asm_search
     li      t0, -1
@@ -643,9 +744,12 @@ rubik_asm_replay_solution:
 .Lrubik_move_names:
     .asciz "R", "", "R2", "R'", "B", "", "B2", "B'", "D", "", "D2", "D'"
 
-    /* Three face-major row pairs. Strides are in bytes, not halfwords. */
+    /* Three face-major row groups. Strides are in bytes, not halfwords. */
     .balign 4
 .Lrubik_transition_rows:
     .word rubik_asm_perm_move_table, rubik_asm_ori_move_table
+    .word rubik_pdb_moves, 0
     .word rubik_asm_perm_move_table + 10080, rubik_asm_ori_move_table + 1458
+    .word rubik_pdb_moves + 3360, 0
     .word rubik_asm_perm_move_table + 20160, rubik_asm_ori_move_table + 2916
+    .word rubik_pdb_moves + 6720, 0

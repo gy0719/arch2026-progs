@@ -5,8 +5,9 @@ Usage: python3 tools/gen-rubik-tables.py | clang-format-20 > \
            src/rubik/rubik_tables.h
        python3 tools/gen-rubik-tables.py --assembly > \
            src/rubik/rubik_asm_tables.S
-The rank order and nibble layout match gy0719/minirubik my_solver.c and
-solver_tables.S. Only this offline generator uses queues.
+The ranks and distances match gy0719/minirubik my_solver.c and
+solver_tables.S. C keeps the original packed nibbles; Assembly emits bytes.
+Only this offline generator uses queues.
 """
 
 import argparse
@@ -45,6 +46,11 @@ def distances(rows):
     return [distance[i] | (distance[i + 1] << 4
                           if i + 1 < len(distance) else 0)
             for i in range(0, len(distance), 2)]
+
+
+def unpack_distances(packed, count):
+    """Expand exactly count nibbles, omitting the final padding nibble."""
+    return [(packed[i >> 1] >> ((i & 1) << 2)) & 15 for i in range(count)]
 
 
 def emit(name, rows, bits, matrix=False):
@@ -87,8 +93,8 @@ def main():
         print('    .section .rodata,"a",@progbits\n')
         emit_assembly("perm_move_table", perm, 16)
         emit_assembly("ori_move_table", ori, 16)
-        emit_assembly("hp_packed", [distances(perm)], 8)
-        emit_assembly("ho_packed", [distances(ori)], 8)
+        emit_assembly("hp_bytes", [unpack_distances(distances(perm), 5040)], 8)
+        emit_assembly("ho_bytes", [unpack_distances(distances(ori), 729)], 8)
         return
     print("#pragma once\n\n#include <stdint.h>\n")
     emit("perm_move_table", perm, 16, True)

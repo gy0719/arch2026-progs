@@ -309,43 +309,27 @@ rubik_asm_rank_orientation:
 
 # Private core convention (only the public wrapper obeys the external ABI):
 # a4/a5 root ranks, a6 solve return PC, t6 search/replay return PC.
-# heuristic uses a3 for its return PC and preserves a4..a6/t6/s registers.
+# heuristic preserves a4..a6/t6/s registers.
 # search keeps the active node in s0..s11, row-pair base in a2,
 # heuristic bases in t3/t4,
 # a1 = 11, ra = 3, t5 = suspended-frame cursor, a7 = path cursor.
 # All helpers keep sp unchanged. The inner loop makes no function calls.
 
-/* a0 = packed table, a1 = coordinate; return a0 = four-bit distance.
- * Clobbers t0/t1. Even coordinates select the low nibble.
+/* a0 = p, a1 = o; return max(hp[p], ho[o]) in a0. Clobbers t0/t2.
+ * One byte per distance removes nibble extraction on both lookup paths.
  */
-.type rubik_asm_packed_get, @function
-rubik_asm_packed_get:
-    srli    t0, a1, 1
-    add     t0, a0, t0
-    lbu     a0, 0(t0)
-    andi    t1, a1, 1
-    slli    t1, t1, 2
-    srl     a0, a0, t1
-    andi    a0, a0, 15
-    ret
-.size rubik_asm_packed_get, . - rubik_asm_packed_get
-
-/* a0 = p, a1 = o; return a0 = max(hp[p], ho[o]). */
 .type rubik_asm_heuristic, @function
 rubik_asm_heuristic:
-    mv      a3, ra
-    mv      a2, a1
-    mv      a1, a0
-    la      a0, rubik_asm_hp_packed
-    jal     ra, rubik_asm_packed_get
-    mv      t2, a0
-    mv      a1, a2
-    la      a0, rubik_asm_ho_packed
-    jal     ra, rubik_asm_packed_get
+    la      t0, rubik_asm_hp_bytes
+    add     t0, t0, a0
+    lbu     t2, 0(t0)
+    la      t0, rubik_asm_ho_bytes
+    add     t0, t0, a1
+    lbu     a0, 0(t0)
     bgeu    a0, t2, .Lheuristic_return
     mv      a0, t2
 .Lheuristic_return:
-    jalr    zero, 0(a3)
+    ret
 .size rubik_asm_heuristic, . - rubik_asm_heuristic
 
 /* a0 = face (R=0, B=1, D=2); return a0/a1 = p/o row pointers.
@@ -417,9 +401,9 @@ rubik_asm_search:
     or      t0, s1, s2
     beqz    t0, .Lsearch_root_goal
 
-    /* Cache packed table bases once per expanded rubik_asm_search root. */
-    la      t3, rubik_asm_hp_packed
-    la      t4, rubik_asm_ho_packed
+    /* Cache byte table bases once per expanded search root. */
+    la      t3, rubik_asm_hp_bytes
+    la      t4, rubik_asm_ho_bytes
     la      a2, .Lrubik_transition_rows
     addi    t5, sp, 0
     addi    a7, sp, 384
@@ -486,23 +470,11 @@ rubik_asm_search:
     slli    t0, s4, 1
     add     t0, s11, t0
     lhu     s4, 0(t0)
-    /* Inline the child heuristic; cold root/solve calls keep the helper.
-     * Preserve its nibble convention and max comparison exactly.
-     */
-    srli    t0, s3, 1
-    add     t0, t3, t0
+    /* Inline the same byte-table max used by the cold root helper. */
+    add     t0, t3, s3
     lbu     t2, 0(t0)
-    andi    t1, s3, 1
-    slli    t1, t1, 2
-    srl     t2, t2, t1
-    andi    t2, t2, 15
-    srli    t0, s4, 1
-    add     t0, t4, t0
+    add     t0, t4, s4
     lbu     a0, 0(t0)
-    andi    t1, s4, 1
-    slli    t1, t1, 2
-    srl     a0, a0, t1
-    andi    a0, a0, 15
     bgeu    a0, t2, .Lsearch_child_heuristic_done
     mv      a0, t2
 .Lsearch_child_heuristic_done:

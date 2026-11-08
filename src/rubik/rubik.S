@@ -3,7 +3,7 @@
 # No C calls, heap, writable globals, recursive calls, or environment access.
 #
 # The 496-byte frame remains 16-byte aligned throughout all private helpers:
-#   0..383    twelve suspended search nodes, each eight 32-bit fields
+#   0..383    twelve 32-byte search slots, four words used per node
 #   384..395  solution path (at most eleven moves)
 #   396       solution length
 #   400/404   original permutation/orientation ranks for replay
@@ -382,7 +382,7 @@ rubik_asm_quarter_transition:
  * Return a0 = -1 (FOUND), or the minimum exceeded f / INT_MAX.
  * Active node:
  *   s0 depth; s1 p; s2 o; s3 quarter_p; s4 quarter_o;
- *   s5 face; s6 turn; s7 previous; s8 minimum; s9 bound;
+ *   s5 face; s6 turn; s7 previous; s8 iteration minimum; s9 bound;
  *   s10 permutation row; s11 orientation row; t3 hp base; t4 ho base.
  *   a2 transition row-pair table base.
  *   t5 points to the current depth's frame slot, updated only on push/pop.
@@ -429,27 +429,34 @@ rubik_asm_search:
     bne     s5, ra, .Lsearch_next_face
     beqz    s0, .Lsearch_exhausted
 
-    /* Return an exhausted child's minimum to its suspended parent. */
-    mv      t0, s8
+    /* A suspended turn is 1..3. Its third turn needs no quarter restore. */
+    lw      s6, -12(t5)
+    beq     s6, ra, .Lsearch_pop_last_turn
+    /* The child's root coordinates are the parent's saved quarter turn. */
+    mv      s3, s1
+    mv      s4, s2
+    /* The child's previous face is the parent's current face. */
+    mv      s5, s7
+    /* The minimum cutoff belongs to the whole iteration, not one node. */
     addi    s0, s0, -1
     addi    t5, t5, -32
     addi    a7, a7, -1
     lw      s1, 0(t5)
     lw      s2, 4(t5)
-    lw      s3, 8(t5)
-    lw      s4, 12(t5)
-    lw      s5, 16(t5)
-    lw      s6, 20(t5)
     lw      s7, 24(t5)
-    lw      s8, 28(t5)
-    bgeu    t0, s8, .Lsearch_restored
-    mv      s8, t0
-.Lsearch_restored:
-    /* A saved turn is 1..3: resume directly without root-loop checks. */
-    bgeu    s6, ra, .Lsearch_advance_face
-    /* A completed face does not need its row pointers restored. */
     search_transition_rows
     j       .Lsearch_generate
+
+.Lsearch_pop_last_turn:
+    /* The next face initializes quarter coordinates from the parent root. */
+    mv      s5, s7
+    addi    s0, s0, -1
+    addi    t5, t5, -32
+    addi    a7, a7, -1
+    lw      s1, 0(t5)
+    lw      s2, 4(t5)
+    lw      s7, 24(t5)
+    j       .Lsearch_advance_face
 
 .Lsearch_next_face:
     bnez    s6, .Lsearch_generate
@@ -493,17 +500,13 @@ rubik_asm_search:
     beq     t0, a1, .Lsearch_loop
 
     /* Only an expanded child suspends its parent. Frame layout:
-     * +0 p, +4 o, +8 quarter_p, +12 quarter_o, +16 face,
-     * +20 turn, +24 previous, +28 minimum; stride = 32 bytes.
+     * +0 p, +4 o, +8/+12/+16 unused,
+     * +20 turn, +24 previous, +28 unused; stride = 32 bytes.
      */
     sw      s1, 0(t5)
     sw      s2, 4(t5)
-    sw      s3, 8(t5)
-    sw      s4, 12(t5)
-    sw      s5, 16(t5)
     sw      s6, 20(t5)
     sw      s7, 24(t5)
-    sw      s8, 28(t5)
     addi    t5, t5, 32
     addi    s0, s0, 1
     addi    a7, a7, 1
@@ -512,7 +515,6 @@ rubik_asm_search:
     mv      s7, s5
     li      s5, 0
     li      s6, 0
-    li      s8, 0x7fffffff
     j       .Lsearch_loop
 
 .Lsearch_cutoff:
